@@ -1,7 +1,13 @@
 import { io } from 'socket.io-client';
 
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
+
+if (!SOCKET_URL) {
+  throw new Error('VITE_SOCKET_URL is required');
+}
+
 // Single shared socket connection to the backend
-export const socket = io('http://localhost:5000', {
+export const socket = io(SOCKET_URL, {
   autoConnect: true,
 });
 
