@@ -1,0 +1,1 @@
+"# full_stack"  initgit add README.mdgit commit -m "first commit"git branch -M maingit remote add origin https://github.com/alazar1of1/full_stack.gitgit push -u origin main
