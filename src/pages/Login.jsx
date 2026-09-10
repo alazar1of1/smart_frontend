@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import LoginBackdrop from '../components/LoginBackdrop';
 
 export default function Login() {
   const { login } = useAuth();
@@ -26,16 +27,17 @@ export default function Login() {
 
   return (
     <div className="auth-page">
+      <LoginBackdrop />
       <div className="auth-card">
-        <div className="auth-logo">
+        <div className="auth-logo stagger-1">
           <div className="logo-icon">🛠️</div>
           <h1>Smart ICT Help Desk</h1>
         </div>
-        <p className="sub">Sign in to your account</p>
+        <p className="sub stagger-2">Sign in to your account</p>
 
         {error && <div className="alert alert-error">{error}</div>}
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} className="stagger-3">
           <div className="form-group">
             <label>Username</label>
             <input
@@ -61,7 +63,7 @@ export default function Login() {
           </button>
         </form>
 
-        <p style={{ marginTop: '20px', textAlign: 'center', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+        <p className="stagger-4" style={{ marginTop: '20px', textAlign: 'center', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
            Contact your administrator for
           login details.
         </p>
