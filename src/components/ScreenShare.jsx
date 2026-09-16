@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { socket } from '../socket';
 
+// የተሻሻሉ STUN servers ለ Remote network traversal
 const STUN_SERVERS = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+  ],
 };
 
-// Simulated maintenance commands the technician can run on the user's machine.
-// Results travel back over the WebRTC data channel and show on both sides.
 const MAINTENANCE_COMMANDS = {
   scan: { output: 'Malware scan complete: 0 threats detected. System is clean.', ok: true },
   clean: { output: 'Cleaned 1.4 GB of temporary files and browser cache.', ok: true },
@@ -18,18 +22,13 @@ const MAINTENANCE_COMMANDS = {
 
 const QUICK_COMMANDS = ['scan', 'clean', 'update', 'check-disk', 'optimize'];
 
-// Shared screen-sharing component with remote maintenance support.
-// - role "user":       shares the screen (sharer) via getDisplayMedia
-// - role "technician": views the shared screen (viewer) and can maintain it
-// Signaling is relayed through Socket.IO rooms named "request:{id}".
-// Remote maintenance cursor/commands travel over a WebRTC DataChannel.
 export default function ScreenShare({ requestId, role, userName }) {
   const [phase, setPhase] = useState('idle'); // idle | requested | active | declined
   const [error, setError] = useState('');
 
   // Remote maintenance state
   const [controlEnabled, setControlEnabled] = useState(false);
-  const [remoteCursor, setRemoteCursor] = useState(null); // user side: { x, y, pulse }
+  const [remoteCursor, setRemoteCursor] = useState(null);
   const [maintenanceLog, setMaintenanceLog] = useState([]);
   const [commandText, setCommandText] = useState('');
 
@@ -37,11 +36,12 @@ export default function ScreenShare({ requestId, role, userName }) {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const streamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
   const dcRef = useRef(null);
   const requestedRef = useRef(false);
   const msgHandlerRef = useRef(() => {});
+  const iceQueueRef = useRef([]);
 
-  // ---------- helper: maintenance log ----------
   const addLog = (side, kind, text) => {
     setMaintenanceLog((prev) => [
       ...prev,
@@ -49,7 +49,6 @@ export default function ScreenShare({ requestId, role, userName }) {
     ]);
   };
 
-  // ---------- data channel helpers ----------
   const sendToPeer = (msg) => {
     const dc = dcRef.current;
     if (dc && dc.readyState === 'open') {
@@ -72,7 +71,6 @@ export default function ScreenShare({ requestId, role, userName }) {
 
   const handlePeerMessage = (msg) => {
     switch (msg.type) {
-      // Technician started remote maintenance -> user enables control immediately
       case 'remote:start':
         if (role === 'user') {
           setControlEnabled(true);
@@ -80,7 +78,6 @@ export default function ScreenShare({ requestId, role, userName }) {
         }
         break;
 
-      // Technician moved the cursor / clicked on the user's screen
       case 'remote:cursor':
         if (role === 'user') {
           setRemoteCursor((cur) => ({
@@ -91,7 +88,6 @@ export default function ScreenShare({ requestId, role, userName }) {
         }
         break;
 
-      // Technician typed a maintenance command -> simulate running it
       case 'remote:command':
         if (role === 'user') {
           addLog('tech', 'cmd', `> ${msg.cmd}`);
@@ -103,14 +99,12 @@ export default function ScreenShare({ requestId, role, userName }) {
         }
         break;
 
-      // User returned the command result -> technician log
       case 'remote:result':
         if (role === 'technician') {
           addLog('user', msg.success ? 'out' : 'err', msg.output);
         }
         break;
 
-      // Either side ended remote maintenance (not the whole screen share)
       case 'remote:stop':
         setControlEnabled(false);
         setRemoteCursor(null);
@@ -139,8 +133,36 @@ export default function ScreenShare({ requestId, role, userName }) {
     dc.onmessage = onChannelMessage;
   };
 
-  // ---------- helper: close connection and clean up ----------
+  // ICE candidates ቀድመው ሲደርሱ በሰላም ለማስተናገድ የሚረዳ Helper
+  const addIceCandidateSafely = async (candidate) => {
+    const pc = pcRef.current;
+    if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('Error adding ICE candidate:', err);
+      }
+    } else {
+      iceQueueRef.current.push(candidate);
+    }
+  };
+
+  const processIceQueue = async () => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    while (iceQueueRef.current.length > 0) {
+      const candidate = iceQueueRef.current.shift();
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('Error processing queued ICE candidate:', err);
+      }
+    }
+  };
+
   const cleanup = () => {
+    iceQueueRef.current = [];
+    remoteStreamRef.current = null;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -148,9 +170,7 @@ export default function ScreenShare({ requestId, role, userName }) {
     if (dcRef.current) {
       try {
         dcRef.current.close();
-      } catch (err) {
-        // ignore
-      }
+      } catch (err) {}
       dcRef.current = null;
     }
     if (pcRef.current) {
@@ -171,7 +191,6 @@ export default function ScreenShare({ requestId, role, userName }) {
     socket.emit('screen:stop', { requestId });
   };
 
-  // ---------- sharer: start capturing the screen ----------
   const startCapture = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -185,7 +204,6 @@ export default function ScreenShare({ requestId, role, userName }) {
       pcRef.current = pc;
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
-      // Share a data channel for remote maintenance (offerer creates it).
       const dc = pc.createDataChannel('remote-maintenance');
       setupDataChannel(dc);
 
@@ -220,24 +238,28 @@ export default function ScreenShare({ requestId, role, userName }) {
     }
   };
 
-  // ---------- viewer: create answer when the offer arrives ----------
   const handleOffer = async (offer) => {
+    setPhase('active');
     const pc = new RTCPeerConnection(STUN_SERVERS);
     pcRef.current = pc;
 
-    // The user (offerer) creates the data channel; we receive it here.
     pc.ondatachannel = (event) => {
       setupDataChannel(event.channel);
     };
 
     pc.ontrack = (e) => {
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0];
+      remoteStreamRef.current = e.streams[0];
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = e.streams[0];
+      }
     };
+
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         socket.emit('screen:ice', { requestId, candidate: e.candidate });
       }
     };
+
     pc.oniceconnectionstatechange = () => {
       if (
         pc.iceConnectionState === 'failed' ||
@@ -249,12 +271,25 @@ export default function ScreenShare({ requestId, role, userName }) {
     };
 
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    await processIceQueue();
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit('screen:answer', { requestId, answer });
   };
 
-  // ---------- socket listeners ----------
+  // Phase ተቀይሮ DOM ሲሰራ Video Ref-ኡን የማገናኘት ስራ
+  useEffect(() => {
+    if (phase === 'active') {
+      if (role === 'user' && localVideoRef.current && streamRef.current) {
+        localVideoRef.current.srcObject = streamRef.current;
+      }
+      if (role === 'technician' && remoteVideoRef.current && remoteStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+    }
+  }, [phase, role]);
+
   useEffect(() => {
     socket.emit('register', { requestId });
 
@@ -262,7 +297,7 @@ export default function ScreenShare({ requestId, role, userName }) {
       if (role === 'user') setPhase('requested');
     };
     const onAccept = () => {
-      if (role === 'technician') setPhase('active');
+      setPhase('active');
     };
     const onDecline = () => {
       if (role === 'technician') setPhase('idle');
@@ -270,15 +305,14 @@ export default function ScreenShare({ requestId, role, userName }) {
     const onOffer = ({ offer }) => {
       if (role === 'technician') handleOffer(offer);
     };
-    const onAnswer = ({ answer }) => {
+    const onAnswer = async ({ answer }) => {
       if (role === 'user' && pcRef.current) {
-        pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+        await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+        await processIceQueue();
       }
     };
     const onIce = ({ candidate }) => {
-      if (pcRef.current) {
-        pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      }
+      addIceCandidateSafely(candidate);
     };
     const onStopped = () => {
       setControlEnabled(false);
@@ -307,14 +341,12 @@ export default function ScreenShare({ requestId, role, userName }) {
       socket.off('screen:stopped', onStopped);
       cleanup();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId, role]);
 
   useEffect(() => {
     msgHandlerRef.current = handlePeerMessage;
   });
 
-  // ---------- technician: request sharing ----------
   const requestSharing = () => {
     requestedRef.current = true;
     setPhase('requested');
@@ -328,6 +360,8 @@ export default function ScreenShare({ requestId, role, userName }) {
   };
 
   const acceptRequest = () => {
+    socket.emit('screen:accept', { requestId });
+    setPhase('active');
     startCapture();
   };
 
@@ -336,7 +370,6 @@ export default function ScreenShare({ requestId, role, userName }) {
     socket.emit('screen:decline', { requestId });
   };
 
-  // ---------- remote maintenance actions ----------
   const requestRemoteControl = () => {
     if (!dcOpen()) {
       setError('The connection is not ready yet. Wait a moment, then try again.');
@@ -371,7 +404,6 @@ export default function ScreenShare({ requestId, role, userName }) {
     setCommandText('');
   };
 
-  // ---------- technician: mouse over the shared video ----------
   const normalizedVideoCoords = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
     return {
